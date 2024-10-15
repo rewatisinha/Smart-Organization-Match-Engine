@@ -1,0 +1,91 @@
+import dataiku
+import pandas as pd
+import numpy as np
+import re
+from rapidfuzz import fuzz
+# Read recipe inputs
+conf_list_with_address = dataiku.Dataset("Extracted_Credit_Union_Data")
+df1 = conf_list_with_address.get_dataframe()
+Master_list_Salesforce = dataiku.Dataset("Master_list_Salesforce")
+df2 = Master_list_Salesforce.get_dataframe()
+# Normalize City and State for case-insensitive comparison
+def normalize_city_state(city_state):
+    if pd.isna(city_state):
+        return ''
+    return city_state.strip().lower()
+df1['Normalized_City'] = df1['City'].apply(normalize_city_state)
+df1['Normalized_State'] = df1['State'].apply(normalize_city_state)
+df2['Normalized_City'] = df2['Billing City'].apply(normalize_city_state)
+df2['Normalized_State'] = df2['Billing State/Province'].apply(normalize_city_state)
+# Function to match City and State
+def match_city_state(row, df2):
+    city_state_match = df2[
+        (df2['Normalized_City'] == row['Normalized_City']) &
+        (df2['Normalized_State'] == row['Normalized_State'])
+    ]
+    if not city_state_match.empty:
+        return city_state_match.iloc[0].to_dict()  # Return the first matching row as a dictionary
+    return {}
+df1['matched_row'] = df1.apply(lambda row: match_city_state(row, df2), axis=1)
+# Expand the 'matched_row' column into separate columns from df2
+def expand_matched_row(matched_row):
+    if matched_row:
+        return pd.Series(matched_row)
+    else:
+        return pd.Series([np.nan] * len(df2.columns), index=df2.columns)
+df2_expanded = df1['matched_row'].apply(expand_matched_row)
+# Ensure df2_expanded has all columns from df2
+df2_expanded = df2_expanded.reindex(columns=df2.columns)
+# Concatenate df1 and df2_expanded to include all columns from both DataFrames
+matched_df = pd.concat([df1.drop(columns=['matched_row']), df2_expanded], axis=1)
+# Extract only the required columns for the final output
+final_df = matched_df[['Institution name', 'City', 'State',
+                       'Institution Name', 'Billing City', 'Billing State/Province']]
+# Function to clean names (ignore "Federal", extra spaces, common suffixes like "Inc")
+def clean_name(name):
+    name = name.lower()
+    name = re.sub(r'\bfederal\b', '', name)
+    name = re.sub(r',?\s*inc\b', '', name)
+    name = re.sub(r'\s+', ' ', name).strip()
+    name = re.sub(r'\bcredit union\b', '', name)
+    name = re.sub(r'\bcu\b', '', name)
+    # Remove any dots
+    name = name.replace('.', '')
+    return name
+# Function to find the best match using rapidfuzz
+def find_best_match(input_name, master_list):
+    cleaned_input_name = clean_name(input_name)
+    best_match = None
+    best_score = 0
+    for master_name in master_list:
+        cleaned_master_name = clean_name(master_name)
+        score = fuzz.ratio(cleaned_input_name, cleaned_master_name)
+        if score > best_score:
+            best_score = score
+            best_match = master_name
+    return best_match, best_score
+# Apply fuzzy matching to company names
+results = []
+for index, row in final_df.iterrows():
+    input_name = row['Institution name']
+    best_match, best_score = find_best_match(input_name, df2['Institution Name'])
+    if best_score >= 0:  # Only keep results with a score of 80 or above
+        results.append({
+            'Company_name': input_name,
+            'City': row['City'],
+            'State': row['State'],
+            'Institution Name': best_match,
+            'Billing City': row['Billing City'],
+            'Billing State/Province': row['Billing State/Province'],
+            'Match_Score': best_score
+        })
+# Create a new dataframe with the results
+Final_Result_df = pd.DataFrame(results)
+ 
+Final_Result_df=Final_Result_df.dropna(subset=['City','Billing City'])
+ 
+# Write recipe outputs
+Final_Result = dataiku.Dataset("Final_Result")
+Final_Result.write_with_schema(Final_Result_df)
+Sales.txt
+Displaying Sales.txt.
